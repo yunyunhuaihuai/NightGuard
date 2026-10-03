@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+build/
+
+# Kotlin
+.kotlin/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Local machine config
+local.properties
+
+# Test session artifacts (screenshots, protobuf dumps, UI dumps)
+/_test/
+
+# OS
+.DS_Store
+Thumbs.db
