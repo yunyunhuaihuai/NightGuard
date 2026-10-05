@@ -48,9 +48,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 旧版本把“来电候选”通知原文（可含完整号码）写进了持久化日志：升级后一次性脱敏
         lifecycleScope.launch(Dispatchers.IO) {
+            // 旧版本把“来电候选”通知原文（可含完整号码）写进了持久化日志：升级后一次性脱敏
             Store.redactLegacyCallCandidateLogs(this@MainActivity)
+            // 应用启动后的幂等恢复：重排丢失的精确闹钟、跳过过期任务、重挂接听监听
+            com.nightguard.app.logic.TaskRecovery.recover(this@MainActivity)
         }
         // 状态栏/导航栏透明，浅色图标，与应用深色主题无缝衔接（消除黑色割裂条）
         enableEdgeToEdge(

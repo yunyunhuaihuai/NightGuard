@@ -233,8 +233,8 @@ fun PermissionsScreen(tick: Int) {
                     OutlinedButton(onClick = {
                         scope.launch {
                             Store.saveRules(ctx, Store.rulesSync(ctx).filter { it.id != "selftest" })
-                            Store.setPendingAlarm(ctx, "selftest", 0L)
-                            AlarmScheduler.cancelDelayed(ctx, "selftest")
+                            // 统一清理：取消待响任务、抑制点、冷却记录与遗留提醒
+                            com.nightguard.app.logic.ActionExecutor.cleanupRuleState(ctx, "selftest")
                         }
                     }) {
                         Text("④ 清除自检规则")

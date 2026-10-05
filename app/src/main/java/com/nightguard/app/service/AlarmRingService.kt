@@ -51,8 +51,11 @@ class AlarmRingService : Service() {
         private val sessionActive = MutableStateFlow(false)
         val sessionActiveFlow: StateFlow<Boolean> get() = sessionActive
 
-        fun ringIntent(context: Context): Intent =
-            Intent(context, AlarmRingService::class.java).setAction(ACTION_RING)
+        fun ringIntent(context: Context, ruleId: String? = null, taskId: String? = null): Intent =
+            Intent(context, AlarmRingService::class.java)
+                .setAction(ACTION_RING)
+                .putExtra("ruleId", ruleId)
+                .putExtra("taskId", taskId)
 
         fun stopPendingIntent(context: Context): PendingIntent =
             PendingIntent.getService(
@@ -88,6 +91,21 @@ class AlarmRingService : Service() {
         sessionActive.value = true
         beginPlaying()
         handler.postDelayed(autoStop, MAX_RING_MS)
+        // 诊断：区分“触发成功”与“实际开始响铃”
+        val ruleId = intent?.getStringExtra("ruleId")
+        if (ruleId != null) {
+            logScope.launch {
+                try {
+                    val name = com.nightguard.app.data.Store.ruleByIdSync(this@AlarmRingService, ruleId)?.name ?: ""
+                    Store.addLog(
+                        this@AlarmRingService,
+                        LogEntry(System.currentTimeMillis(), name, "", "开始响铃（最长 60 秒）")
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "log ring start failed", e)
+                }
+            }
+        }
         return START_NOT_STICKY
     }
 

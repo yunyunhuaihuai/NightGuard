@@ -62,6 +62,18 @@ object RuleEngine {
         }
     }
 
+    /**
+     * “本窗口不再响”的统一边界（抑制截止时刻）：
+     * - 普通窗口：当日结束分钟；
+     * - 跨午夜：当前窗口的结束时刻（晚间触发到次日 end，凌晨触发到当日 end）；
+     * - 全天（start==end）：当前时刻 + 24h；
+     * - 此刻不在窗口内：+24h 兜底（窗口外本就不触发，抑制点此时无实际意义）。
+     */
+    fun suppressUntilFor(rule: Rule, now: Long): Long {
+        val end = nextWindowEnd(rule, now)
+        return if (end != null && end > now) end else now + 24 * 3600_000L
+    }
+
     private fun todayAt(cal: Calendar, minutes: Int): Long {
         val c = (cal.clone() as Calendar)
         c.set(Calendar.HOUR_OF_DAY, minutes / 60)
@@ -174,7 +186,9 @@ object RuleEngine {
     }
 
     /**
-     * 触发流水线：窗口判断 → 冷却去重 → 执行动作 → 记日志。
+     * 触发流水线：窗口判断 → 冷却去重 → 装载延迟响铃任务。
+     * 装载结果（成功/去重跳过/失败）由 ActionExecutor 统一记日志，
+     * “触发成功”不等于“实际响铃成功”——开始响铃另有独立日志。
      */
     suspend fun onEventTriggered(context: Context, rule: Rule, source: String, isCall: Boolean = false): Boolean {
         android.util.Log.d(TAG, "onEventTriggered rule=${rule.id} enabled=${rule.enabled}")
@@ -191,15 +205,9 @@ object RuleEngine {
         if (rule.cooldownSeconds > 0 && now - last < rule.cooldownSeconds * 1000L) return false
         Store.markTriggered(context, rule.id, now)
 
-        var acted = false
-        if (rule.delayedAlarm) {
-            ActionExecutor.armDelayedAlarm(context, rule, now + rule.alarmDelayMinutes * 60_000L, source, isCall)
-            acted = true
-        }
-        if (acted) {
-            Store.addLog(context, LogEntry(now, rule.name, source, rule.describeActions()))
-        }
-        return acted
+        if (!rule.delayedAlarm) return false
+        val outcome = ActionExecutor.armDelayedAlarm(context, rule, now + rule.alarmDelayMinutes * 60_000L, source, isCall)
+        return outcome is ActionExecutor.ArmOutcome.Armed
     }
 
     // ---------- 通知文本解析 ----------

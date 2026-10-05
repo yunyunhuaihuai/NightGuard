@@ -10,14 +10,18 @@ import com.nightguard.app.receiver.NightReceiver
 
 /**
  * 精确闹钟调度 + 通知渠道。
- * USE_EXACT_ALARM 已自动授予；万一被 ROM 拒绝则退化为 1 分钟窗口闹钟。
+ * USE_EXACT_ALARM 已自动授予；被 ROM/用户拒绝时退化为 60 秒窗口闹钟——
+ * 这是能力降级：窗口闹钟不承诺准点（Doze/ROM 限制下可能更晚），
+ * 调用方须把降级显式记入日志并在界面上反映。
  */
 object AlarmScheduler {
     const val ACTION_DELAYED_ALARM = "com.nightguard.app.action.DELAYED_ALARM"
     const val ACTION_HEARTBEAT = "com.nightguard.app.action.HEARTBEAT"
     const val ACTION_CANCEL_ALARM = "com.nightguard.app.action.CANCEL_ALARM"
     const val ACTION_SUPPRESS_RULE = "com.nightguard.app.action.SUPPRESS_RULE"
-    const val ACTION_CHECK_CALL_STATE = "com.nightguard.app.action.CHECK_CALL_STATE"
+
+    const val EXTRA_RULE_ID = "ruleId"
+    const val EXTRA_TASK_ID = "taskId"
 
     const val CHANNEL_RING = "ring"
     const val CHANNEL_STATUS = "status"
@@ -26,12 +30,13 @@ object AlarmScheduler {
     fun am(context: Context): AlarmManager =
         context.getSystemService(AlarmManager::class.java)
 
-    fun delayedPI(context: Context, ruleId: String): PendingIntent {
+    fun delayedPI(context: Context, ruleId: String, taskId: String): PendingIntent {
         val intent = Intent(context, NightReceiver::class.java)
             .setAction(ACTION_DELAYED_ALARM)
-            .putExtra("ruleId", ruleId)
+            .putExtra(EXTRA_RULE_ID, ruleId)
+            .putExtra(EXTRA_TASK_ID, taskId)
         return PendingIntent.getBroadcast(
-            context, ruleId.hashCode(), intent,
+            context, taskId.hashCode(), intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
     }
@@ -44,54 +49,48 @@ object AlarmScheduler {
         )
     }
 
-    /** “本次不响”：取消该规则当前待响的闹钟 */
-    fun cancelAlarmPI(context: Context, ruleId: String): PendingIntent {
+    /** “本次不响”：取消该规则当前待响的任务（PI 上带 taskId，过期通知的请求会被忽略） */
+    fun cancelAlarmPI(context: Context, ruleId: String, taskId: String): PendingIntent {
         val intent = Intent(context, NightReceiver::class.java)
             .setAction(ACTION_CANCEL_ALARM)
-            .putExtra("ruleId", ruleId)
+            .putExtra(EXTRA_RULE_ID, ruleId)
+            .putExtra(EXTRA_TASK_ID, taskId)
         return PendingIntent.getBroadcast(
-            context, ruleId.hashCode(), intent,
+            context, taskId.hashCode() + 1, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
     }
 
-    /** “今天不再响”：本监听窗口内该规则不再触发 */
-    fun suppressPI(context: Context, ruleId: String): PendingIntent {
+    /** “今天不再响”：本监听窗口内该规则不再触发（规则级意图，取消当前任务不校验 taskId） */
+    fun suppressPI(context: Context, ruleId: String, taskId: String): PendingIntent {
         val intent = Intent(context, NightReceiver::class.java)
             .setAction(ACTION_SUPPRESS_RULE)
-            .putExtra("ruleId", ruleId)
+            .putExtra(EXTRA_RULE_ID, ruleId)
+            .putExtra(EXTRA_TASK_ID, taskId)
         return PendingIntent.getBroadcast(
-            context, ruleId.hashCode() + 1, intent,
+            context, taskId.hashCode() + 2, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
     }
 
-    /** 延迟中途检查通话状态：已接听则自动取消闹钟 */
-    fun checkCallPI(context: Context, ruleId: String): PendingIntent {
-        val intent = Intent(context, NightReceiver::class.java)
-            .setAction(ACTION_CHECK_CALL_STATE)
-            .putExtra("ruleId", ruleId)
-        return PendingIntent.getBroadcast(
-            context, ruleId.hashCode() + 2, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-    }
-
-    fun cancelCheckCall(context: Context, ruleId: String) {
-        am(context)?.cancel(checkCallPI(context, ruleId))
-    }
-
-    fun scheduleExact(context: Context, at: Long, pi: PendingIntent) {
-        val alarm = am(context) ?: return
-        if (alarm.canScheduleExactAlarms()) {
+    /**
+     * 排精确闹钟。
+     * @return true=精确调度；false=能力降级（窗口闹钟，不承诺准点）
+     * @throws SecurityException 精确闹钟权限在运行期被拒绝且 ROM 不接受降级
+     */
+    fun scheduleExact(context: Context, at: Long, pi: PendingIntent): Boolean {
+        val alarm = am(context) ?: throw IllegalStateException("AlarmManager 不可用")
+        return if (alarm.canScheduleExactAlarms()) {
             alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+            true
         } else {
             alarm.setWindow(AlarmManager.RTC_WAKEUP, at, 60_000L, pi)
+            false
         }
     }
 
-    fun cancelDelayed(context: Context, ruleId: String) {
-        am(context)?.cancel(delayedPI(context, ruleId))
+    fun cancelDelayed(context: Context, ruleId: String, taskId: String) {
+        am(context)?.cancel(delayedPI(context, ruleId, taskId))
     }
 
     /** 每日一次心跳（唯一周期任务）：自检通知监听连接 + 补漏恢复 */

@@ -120,6 +120,37 @@ class RuleEngineLogicTest {
         assertEquals(null, RuleEngine.nextWindowEnd(r, calAt(1, 23, 0).timeInMillis))
     }
 
+    // ---------- “本窗口不再响”统一边界 ----------
+
+    @Test
+    fun `抑制边界 非跨午夜当日结束`() {
+        val r = rule(start = 8 * 60, end = 22 * 60)
+        assertEquals(calAt(1, 22, 0).timeInMillis, RuleEngine.suppressUntilFor(r, calAt(1, 9, 30).timeInMillis))
+    }
+
+    @Test
+    fun `抑制边界 跨午夜到当前窗口结束`() {
+        val r = rule()
+        // 周一 23:00 触发 → 周二 07:00 窗口结束
+        assertEquals(calAt(2, 7, 0).timeInMillis, RuleEngine.suppressUntilFor(r, calAt(1, 23, 0).timeInMillis))
+        // 周一凌晨 02:00 触发 → 当日 07:00
+        assertEquals(calAt(1, 7, 0).timeInMillis, RuleEngine.suppressUntilFor(r, calAt(1, 2, 0).timeInMillis))
+    }
+
+    @Test
+    fun `抑制边界 全天为 24 小时`() {
+        val r = rule(start = 0, end = 0)
+        val now = calAt(1, 15, 0).timeInMillis
+        assertEquals(now + 24 * 3600_000L, RuleEngine.suppressUntilFor(r, now))
+    }
+
+    @Test
+    fun `抑制边界 窗口外兜底 24 小时`() {
+        val r = rule(start = 8 * 60, end = 22 * 60)
+        val now = calAt(1, 23, 0).timeInMillis
+        assertEquals(now + 24 * 3600_000L, RuleEngine.suppressUntilFor(r, now))
+    }
+
     // ---------- 匹配 ----------
 
     @Test

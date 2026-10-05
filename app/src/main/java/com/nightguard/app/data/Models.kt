@@ -164,3 +164,41 @@ object RuleJson {
         emptyMap()
     }
 }
+
+/** 待响任务持久化编解码（DataStore 单键 JSON 数组） */
+object PendingTaskJson {
+
+    fun listToJson(list: List<PendingTask>): String =
+        JSONArray().apply { list.forEach { t ->
+            put(JSONObject().apply {
+                put("taskId", t.taskId)
+                put("ruleId", t.ruleId)
+                put("fireAt", t.fireAt)
+                put("source", t.source)
+                put("createdAt", t.createdAt)
+                put("fromCall", t.fromCall)
+                put("status", t.status)
+            })
+        } }.toString()
+
+    fun listFromJson(s: String): List<PendingTask> = try {
+        val arr = JSONArray(s)
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.getJSONObject(i)
+            val taskId = o.optString("taskId")
+            val ruleId = o.optString("ruleId")
+            if (taskId.isBlank() || ruleId.isBlank()) return@mapNotNull null
+            PendingTask(
+                taskId = taskId,
+                ruleId = ruleId,
+                fireAt = o.optLong("fireAt"),
+                source = o.optString("source"),
+                createdAt = o.optLong("createdAt"),
+                fromCall = o.optBoolean("fromCall"),
+                status = o.optString("status", TaskStatus.ARMED),
+            )
+        }
+    } catch (e: Exception) {
+        emptyList()
+    }
+}

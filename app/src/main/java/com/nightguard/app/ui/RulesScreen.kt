@@ -93,8 +93,9 @@ fun RulesScreen() {
             onDelete = {
                 val id = current.id
                 editing = null
-                androidx.core.app.NotificationManagerCompat.from(ctx).cancel(id.hashCode())
                 scope.launch(Dispatchers.IO) {
+                    // 统一清理：待响任务（闹钟/提醒/接听监听）、抑制点、冷却记录
+                    com.nightguard.app.logic.ActionExecutor.cleanupRuleState(ctx, id)
                     val updated = Store.rulesSync(ctx).filter { it.id != id }
                     Store.saveRules(ctx, updated)
                     rules = Store.rulesSync(ctx)
@@ -124,6 +125,10 @@ fun RulesScreen() {
                                     if (it.id == rule.id) it.copy(enabled = enabled) else it
                                 }
                                 Store.saveRules(ctx, updated)
+                                if (!enabled) {
+                                    // 禁用即取消其待响任务，防止“禁用再启用后旧任务还会响”
+                                    com.nightguard.app.logic.ActionExecutor.cleanupRuleState(ctx, rule.id)
+                                }
                                 rules = Store.rulesSync(ctx)
                             }
                         },

@@ -26,9 +26,52 @@ object Store {
     private val KEY_LAST_CONNECTED = longPreferencesKey("lastConnectedAt")
     private val KEY_LAST_DISCONNECTED = longPreferencesKey("lastDisconnectedAt")
     private val KEY_LAST_REBIND = longPreferencesKey("lastRebindAt")
+    private val KEY_TASKS = stringPreferencesKey("pendingTasks")
 
     /** 历史“来电候选”日志脱敏后的占位文案 */
     private const val REDACTED_PLACEHOLDER = "（旧版本记录的来电通知原文已清除）"
+
+    // ---------- 待响任务（第二阶段统一生命周期，替代 pendingAlarm） ----------
+
+    /**
+     * DataStore 任务仓库。read 内完成旧 `pendingAlarm`（Map<ruleId,毫秒>）的一次性迁移：
+     * 转成 legacy 任务（未来时刻保持 armed，已过期的直接标记 expired 供诊断），
+     * 迁移后删除旧键，不丢用户数据。
+     */
+    val pendingTaskBacking: PendingTaskBacking = object : PendingTaskBacking {
+        override suspend fun read(ctx: TaskCtx): List<PendingTask> {
+            val context = ctx as Context
+            var out: List<PendingTask> = emptyList()
+            context.dataStore.edit { p ->
+                val existing = PendingTaskJson.listFromJson(p[KEY_TASKS] ?: "[]")
+                val legacy = RuleJson.mapFromJson(p[KEY_PENDING] ?: "{}")
+                out = if (legacy.isNotEmpty()) {
+                    val n = System.currentTimeMillis()
+                    val converted = legacy.map { (ruleId, at) ->
+                        PendingTask(
+                            taskId = PendingTask.LEGACY_PREFIX + ruleId,
+                            ruleId = ruleId,
+                            fireAt = at,
+                            source = "旧版本迁移",
+                            createdAt = n,
+                            fromCall = false,
+                            status = if (at > n) TaskStatus.ARMED else TaskStatus.EXPIRED,
+                        )
+                    }
+                    p[KEY_TASKS] = PendingTaskJson.listToJson(existing + converted)
+                    p.remove(KEY_PENDING)
+                    existing + converted
+                } else {
+                    existing
+                }
+            }
+            return out
+        }
+
+        override suspend fun write(ctx: TaskCtx, tasks: List<PendingTask>) {
+            (ctx as Context).dataStore.edit { it[KEY_TASKS] = PendingTaskJson.listToJson(tasks) }
+        }
+    }
 
     // ---------- 规则 ----------
     suspend fun rules(ctx: Context): List<Rule> =
@@ -93,6 +136,24 @@ object Store {
     }
 
     // ---------- 待响闹钟（防重复定时） ----------
+    suspend fun pendingTasks(ctx: Context): List<PendingTask> = pendingTaskBacking.read(ctx)
+
+    /** 删除规则时统一清理其运行状态（抑制点、冷却记录） */
+    suspend fun removeRuleStateKeys(ctx: Context, ruleId: String) {
+        ctx.dataStore.edit { p ->
+            val sup = RuleJson.mapFromJson(p[KEY_SUPPRESS] ?: "{}")
+            if (sup.containsKey(ruleId)) {
+                val m = sup.toMutableMap(); m.remove(ruleId)
+                p[KEY_SUPPRESS] = RuleJson.mapToJson(m)
+            }
+            val lt = RuleJson.mapFromJson(p[KEY_LAST_TRIGGER] ?: "{}")
+            if (lt.containsKey(ruleId)) {
+                val m = lt.toMutableMap(); m.remove(ruleId)
+                p[KEY_LAST_TRIGGER] = RuleJson.mapToJson(m)
+            }
+        }
+    }
+
     suspend fun pendingAlarms(ctx: Context): Map<String, Long> =
         RuleJson.mapFromJson(ctx.dataStore.data.first()[KEY_PENDING] ?: "{}")
 
