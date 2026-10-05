@@ -20,7 +20,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import com.nightguard.app.data.Store
 import com.nightguard.app.logic.AlarmScheduler
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -44,6 +48,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 旧版本把“来电候选”通知原文（可含完整号码）写进了持久化日志：升级后一次性脱敏
+        lifecycleScope.launch(Dispatchers.IO) {
+            Store.redactLegacyCallCandidateLogs(this@MainActivity)
+        }
         // 状态栏/导航栏透明，浅色图标，与应用深色主题无缝衔接（消除黑色割裂条）
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),

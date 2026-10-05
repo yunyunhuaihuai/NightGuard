@@ -16,13 +16,27 @@ import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.Log
 import com.nightguard.app.R
+import com.nightguard.app.data.LogEntry
+import com.nightguard.app.data.Store
 import com.nightguard.app.logic.AlarmScheduler
 import com.nightguard.app.ui.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 
 /**
  * 响铃前台服务（shortService 类型，系统强制分钟级超时，与“响 1 分钟自动停”契合）。
  * 由精确闹钟的 Receiver 以 startForegroundService 拉起（官方允许的后台启动豁免场景）。
+ *
+ * 响铃会话：服务用 [sessionActiveFlow] 对外暴露“当前是否有响铃会话”，
+ * 自动超时 / 用户停止 / 播放失败 / 服务销毁四条路径都会把会话置为结束，
+ * RingActivity 观察到结束即自动退出，避免残留亮屏页面。
  */
 class AlarmRingService : Service() {
 
@@ -31,6 +45,11 @@ class AlarmRingService : Service() {
         const val ACTION_STOP = "com.nightguard.app.action.STOP"
         private const val NOTIF_ID = 42
         private const val MAX_RING_MS = 60_000L
+        private const val TAG = "NightGuard"
+
+        /** 当前是否有响铃会话；RingActivity 据此在会话结束后自动退出 */
+        private val sessionActive = MutableStateFlow(false)
+        val sessionActiveFlow: StateFlow<Boolean> get() = sessionActive
 
         fun ringIntent(context: Context): Intent =
             Intent(context, AlarmRingService::class.java).setAction(ACTION_RING)
@@ -49,6 +68,9 @@ class AlarmRingService : Service() {
     private var vibrator: Vibrator? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
+    /** 服务内异步写诊断日志用（响铃失败等），随服务销毁取消 */
+    private val logScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -63,6 +85,7 @@ class AlarmRingService : Service() {
             stopNow()
             return START_NOT_STICKY
         }
+        sessionActive.value = true
         beginPlaying()
         handler.postDelayed(autoStop, MAX_RING_MS)
         return START_NOT_STICKY
@@ -74,6 +97,7 @@ class AlarmRingService : Service() {
 
     override fun onDestroy() {
         stopNow()
+        logScope.cancel()
         super.onDestroy()
     }
 
@@ -107,6 +131,7 @@ class AlarmRingService : Service() {
         stopPlaying()
         val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+        var started = false
         try {
             player = MediaPlayer().apply {
                 setDataSource(this@AlarmRingService, uri)
@@ -120,8 +145,21 @@ class AlarmRingService : Service() {
                 prepare()
                 start()
             }
+            started = true
         } catch (e: Exception) {
             player = null
+            Log.e(TAG, "响铃播放失败", e)
+            logScope.launch {
+                Store.addLog(
+                    this@AlarmRingService,
+                    LogEntry(System.currentTimeMillis(), "", "响铃", "响铃播放失败：${e.message ?: e.javaClass.simpleName}")
+                )
+            }
+        }
+        if (!started) {
+            // 播放失败不再靠震动硬撑：立即收尾，退出前台/页面并释放全部资源
+            stopNow()
+            return
         }
         vibrator = defaultVibrator()?.apply {
             vibrate(VibrationEffect.createWaveform(longArrayOf(0, 600, 400), intArrayOf(0, 255, 0), 0))
@@ -137,6 +175,7 @@ class AlarmRingService : Service() {
     private fun stopNow() {
         handler.removeCallbacks(autoStop)
         stopPlaying()
+        sessionActive.value = false
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } catch (e: Exception) {

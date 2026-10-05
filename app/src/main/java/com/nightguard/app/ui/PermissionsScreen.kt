@@ -158,7 +158,8 @@ fun PermissionsScreen(tick: Int) {
                 Text(
                     "来电通过“通知使用权”读取系统拨号器的来电通知来识别（不接管系统来电筛选，" +
                             "不影响自带骚扰拦截）。命中规则联系人时通知文本需包含其姓名或号码；" +
-                            "每次通话都会在“日志”页记录一条“来电候选”，可用于核对各机型格式。",
+                            "每次通话都会在“日志”页记录一条“来电候选”，但只记包名与文本长度等元数据，" +
+                            "通知原文（可能含完整号码）不会进入本地日志。",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp)

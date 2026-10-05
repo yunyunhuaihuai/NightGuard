@@ -21,9 +21,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 锁屏上弹出的响铃页：showWhenLocked + turnScreenOn（有全屏通知权限才亮屏，拿不到则只有声音/震动）。
+ *
+ * 与响铃会话绑定：全屏意图可能在服务置位会话前弹出，最多等 3 秒；
+ * 会话结束后（自动超时 / 用户停止 / 播放失败 / 服务销毁）自动 finish，
+ * 不再残留亮屏页面（FLAG_KEEP_SCREEN_ON 随页面销毁释放）。
  */
 class RingActivity : ComponentActivity() {
 
@@ -38,6 +46,18 @@ class RingActivity : ComponentActivity() {
                     stopService(Intent(this, AlarmRingService::class.java))
                     finish()
                 })
+            }
+        }
+        lifecycleScope.launch {
+            val active = withTimeoutOrNull(3000L) {
+                AlarmRingService.sessionActiveFlow.first { it }
+            }
+            if (active != true) {
+                finish()
+                return@launch
+            }
+            AlarmRingService.sessionActiveFlow.collect { ringActive ->
+                if (!ringActive) finish()
             }
         }
     }

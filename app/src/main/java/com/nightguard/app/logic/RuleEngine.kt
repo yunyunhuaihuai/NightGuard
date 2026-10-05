@@ -129,16 +129,19 @@ object RuleEngine {
         }
     }
 
-    /** NLS 收到“疑似来电”通知：先记候选日志（便于校准各 ROM 格式），再匹配规则 */
+    /** NLS 收到“疑似来电”通知：先记候选元数据日志（不落原文），再匹配规则 */
     suspend fun onCallNotification(context: Context, sbn: StatusBarNotification) {
         val pkg = sbn.packageName
         val text = extractText(sbn)
+        // 隐私：来电通知正文常含完整号码/姓名，持久化日志只记长度等元数据；
+        // 校准各 ROM 格式用 Log.d（仅设备内存 ring buffer，几分钟即翻转，不落盘）
+        android.util.Log.d(TAG, "onCallNotification pkg=$pkg cat=${sbn.notification?.category} textLen=${text.length} text=$text")
         Store.addLog(
             context,
             LogEntry(
                 System.currentTimeMillis(), "",
                 "来电候选·${shortPkg(pkg)}",
-                text.take(80).ifBlank { "(无文本)" }
+                callCandidateMeta(text)
             )
         )
         // 未接来电通知不作为触发源：原始来电通知已经触发过，未接是对它的重复播报
@@ -201,19 +204,47 @@ object RuleEngine {
 
     // ---------- 通知文本解析 ----------
 
-    /** 提取标题/正文/大文本/会话消息，仅供内存中匹配关键词，不落盘 */
+    /** “来电候选”持久化日志的脱敏元数据文案（新格式，供历史日志脱敏时识别） */
+    fun callCandidateMeta(text: String): String = "通知文本 ${text.length} 字（隐私不记录原文）"
+
+    /**
+     * 提取标题/正文/大文本/会话消息，仅供内存中匹配关键词，不落盘。
+     *
+     * EXTRA_MESSAGES 里装的是 Bundle[]（跨进程已消息化），不能直接强转 MessagingStyle.Message——
+     * 必须走 `Message.getMessagesFromBundleArray()` 解包，否则标准 MessagingStyle 通知
+     * （微信/QQ/短信等）的发送者与正文全部丢失，关键词匹配失效。
+     */
     fun extractText(sbn: StatusBarNotification): String {
         val ex = sbn.notification.extras
+        val msgs = Notification.MessagingStyle.Message.getMessagesFromBundleArray(
+            ex.getParcelableArray(Notification.EXTRA_MESSAGES)
+        )
+        return composeExtractedText(
+            title = ex.getCharSequence(Notification.EXTRA_TITLE),
+            text = ex.getCharSequence(Notification.EXTRA_TEXT),
+            bigText = ex.getCharSequence(Notification.EXTRA_BIG_TEXT),
+            messages = msgs.map { it.senderPerson?.name?.toString() to it.text },
+        )
+    }
+
+    /**
+     * 纯字符串组装（JVM 可测）：标题/正文/大文本各一段，会话消息每条一段“发送者:正文”。
+     * 与旧实现一致地过滤空白段；发送者与正文都为空的消息段直接跳过。
+     */
+    fun composeExtractedText(
+        title: CharSequence?,
+        text: CharSequence?,
+        bigText: CharSequence?,
+        messages: List<Pair<String?, CharSequence?>>,
+    ): String {
         val parts = mutableListOf<String>()
-        ex.getCharSequence(Notification.EXTRA_TITLE)?.let { parts.add(it.toString()) }
-        ex.getCharSequence(Notification.EXTRA_TEXT)?.let { parts.add(it.toString()) }
-        ex.getCharSequence(Notification.EXTRA_BIG_TEXT)?.let { parts.add(it.toString()) }
-        val msgs = ex.getParcelableArray(Notification.EXTRA_MESSAGES)
-        msgs?.forEach { m ->
-            (m as? Notification.MessagingStyle.Message)?.let { msg ->
-                val sender = msg.senderPerson?.name?.toString() ?: ""
-                parts.add(sender + ":" + (msg.text?.toString() ?: ""))
-            }
+        title?.let { parts.add(it.toString()) }
+        text?.let { parts.add(it.toString()) }
+        bigText?.let { parts.add(it.toString()) }
+        messages.forEach { (sender, body) ->
+            val s = sender?.toString() ?: ""
+            val b = body?.toString() ?: ""
+            if (s.isNotBlank() || b.isNotBlank()) parts.add("$s:$b")
         }
         return parts.filter { it.isNotBlank() }.joinToString("\n")
     }

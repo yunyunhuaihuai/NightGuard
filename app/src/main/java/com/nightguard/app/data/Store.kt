@@ -27,6 +27,9 @@ object Store {
     private val KEY_LAST_DISCONNECTED = longPreferencesKey("lastDisconnectedAt")
     private val KEY_LAST_REBIND = longPreferencesKey("lastRebindAt")
 
+    /** 历史“来电候选”日志脱敏后的占位文案 */
+    private const val REDACTED_PLACEHOLDER = "（旧版本记录的来电通知原文已清除）"
+
     // ---------- 规则 ----------
     suspend fun rules(ctx: Context): List<Rule> =
         RuleJson.rulesFromJson(ctx.dataStore.data.first()[KEY_RULES] ?: "[]")
@@ -54,6 +57,28 @@ object Store {
     }
 
     fun logSync(ctx: Context): List<LogEntry> = runBlocking { log(ctx) }
+
+    /**
+     * 一次性脱敏历史“来电候选”日志：旧版本会把来电通知原文（可含完整号码/联系人姓名）
+     * 写进持久化日志。只替换这类条目的正文部分为脱敏占位，与该缺陷无关的记录原样保留；
+     * 幂等，可在每次进程启动时调用。
+     */
+    suspend fun redactLegacyCallCandidateLogs(ctx: Context) {
+        ctx.dataStore.edit { p ->
+            val list = RuleJson.logFromJson(p[KEY_LOG] ?: "[]")
+            var changed = false
+            val fixed = list.map { e ->
+                val legacy = e.source.startsWith("来电候选") &&
+                        !e.actions.startsWith("通知文本 ") &&
+                        !e.actions.startsWith(REDACTED_PLACEHOLDER)
+                if (legacy) {
+                    changed = true
+                    e.copy(actions = REDACTED_PLACEHOLDER)
+                } else e
+            }
+            if (changed) p[KEY_LOG] = RuleJson.logToJson(fixed)
+        }
+    }
 
     // ---------- 冷却去重 ----------
     suspend fun lastTrigger(ctx: Context): Map<String, Long> =
