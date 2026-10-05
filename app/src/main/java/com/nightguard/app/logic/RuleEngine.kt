@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.service.notification.StatusBarNotification
 import androidx.core.content.ContextCompat
 import com.nightguard.app.data.LogEntry
+import com.nightguard.app.data.LogKind
 import com.nightguard.app.data.Rule
 import com.nightguard.app.data.Store
 import java.util.Calendar
@@ -197,7 +198,7 @@ object RuleEngine {
         // “今天不再响”抑制期内直接跳过（记一条日志便于确认，不响铃）
         val suppressUntil = Store.suppressUntil(context)[rule.id] ?: 0L
         if (now < suppressUntil) {
-            Store.addLog(context, LogEntry(now, rule.name, source, "已抑制（手动设置了今天不再响）"))
+            Store.addLog(context, LogEntry(now, rule.name, source, "已抑制（手动设置了今天不再响）", LogKind.SUPPRESS))
             return false
         }
         if (!inWindow(rule)) return false

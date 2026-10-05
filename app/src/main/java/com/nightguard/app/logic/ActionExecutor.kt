@@ -12,6 +12,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.nightguard.app.R
 import com.nightguard.app.data.LogEntry
+import com.nightguard.app.data.LogKind
 import com.nightguard.app.data.PendingTaskCore
 import com.nightguard.app.data.PendingTasks
 import com.nightguard.app.data.Rule
@@ -58,7 +59,7 @@ object ActionExecutor {
             is PendingTaskCore.ArmDecision.Deduped -> {
                 Store.addLog(
                     context,
-                    LogEntry(now, rule.name, source, "已有待响任务（${fmtTime(decision.existing.fireAt)} 到点），跳过重复装载")
+                    LogEntry(now, rule.name, source, "已有待响任务（${fmtTime(decision.existing.fireAt)} 到点），跳过重复装载", LogKind.ARM_SKIPPED)
                 )
                 ArmOutcome.Deduped(decision.existing.fireAt)
             }
@@ -71,7 +72,7 @@ object ActionExecutor {
                     PendingTasks.markFailed(context, rule.id, task.taskId)
                     Store.addLog(
                         context,
-                        LogEntry(now, rule.name, source, "闹钟装载失败：${e.message ?: e.javaClass.simpleName}")
+                        LogEntry(now, rule.name, source, "闹钟装载失败：${e.message ?: e.javaClass.simpleName}", LogKind.ARM_FAILED)
                     )
                     return ArmOutcome.Failed(e.message ?: e.javaClass.simpleName)
                 }
@@ -85,7 +86,8 @@ object ActionExecutor {
                     context,
                     LogEntry(
                         now, rule.name, source,
-                        rule.describeActions() + if (exact) "" else "（非精确模式，响铃时间不保证准点）"
+                        rule.describeActions() + if (exact) "" else "（非精确模式，响铃时间不保证准点）",
+                        LogKind.ARM
                     )
                 )
                 ArmOutcome.Armed(task.taskId, exact)
@@ -120,7 +122,13 @@ object ActionExecutor {
      * 撤闹钟 + 撤静默提醒 + 停接听监听 + 记日志。
      * @return true=确实取消了任务；false=没有任务或请求来自过期通知（已忽略）
      */
-    suspend fun cancelRuleAlarm(context: Context, ruleId: String?, taskId: String?, logText: String): Boolean {
+    suspend fun cancelRuleAlarm(
+        context: Context,
+        ruleId: String?,
+        taskId: String?,
+        logText: String,
+        kind: String = LogKind.CANCEL,
+    ): Boolean {
         if (ruleId == null) return false
         val decision = PendingTasks.cancel(context, ruleId, taskId)
         when (decision) {
@@ -134,7 +142,7 @@ object ActionExecutor {
                 }
                 Store.addLog(
                     context,
-                    LogEntry(System.currentTimeMillis(), Store.ruleByIdSync(context, ruleId)?.name ?: "", task.source, logText)
+                    LogEntry(System.currentTimeMillis(), Store.ruleById(context, ruleId)?.name ?: "", task.source, logText, kind)
                 )
                 return true
             }
@@ -151,7 +159,7 @@ object ActionExecutor {
         val now = System.currentTimeMillis()
         val until = RuleEngine.suppressUntilFor(rule, now)
         Store.setSuppressUntil(context, rule.id, until)
-        cancelRuleAlarm(context, rule.id, null, "已设为今天不再响（至 ${fmtTime(until)}）")
+        cancelRuleAlarm(context, rule.id, null, "已设为今天不再响（至 ${fmtTime(until)}）", LogKind.SUPPRESS)
     }
 
     /**

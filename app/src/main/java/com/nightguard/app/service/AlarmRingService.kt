@@ -19,6 +19,7 @@ import android.os.VibratorManager
 import android.util.Log
 import com.nightguard.app.R
 import com.nightguard.app.data.LogEntry
+import com.nightguard.app.data.LogKind
 import com.nightguard.app.data.Store
 import com.nightguard.app.logic.AlarmScheduler
 import com.nightguard.app.ui.MainActivity
@@ -28,6 +29,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -66,7 +68,10 @@ class AlarmRingService : Service() {
     }
 
     private val handler = Handler(Looper.getMainLooper())
-    private val autoStop = Runnable { stopNow() }
+    private val autoStop = Runnable {
+        logStop("响铃 60 秒自动停止")
+        stopNow()
+    }
     private var player: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -85,6 +90,7 @@ class AlarmRingService : Service() {
         // 无论哪个动作都先进前台，满足 startForegroundService 的合规要求
         startAsForeground()
         if (intent?.action == ACTION_STOP) {
+            logStop("响铃已手动停止")
             stopNow()
             return START_NOT_STICKY
         }
@@ -96,11 +102,8 @@ class AlarmRingService : Service() {
         if (ruleId != null) {
             logScope.launch {
                 try {
-                    val name = com.nightguard.app.data.Store.ruleByIdSync(this@AlarmRingService, ruleId)?.name ?: ""
-                    Store.addLog(
-                        this@AlarmRingService,
-                        LogEntry(System.currentTimeMillis(), name, "", "开始响铃（最长 60 秒）")
-                    )
+                    val name = Store.ruleById(this@AlarmRingService, ruleId)?.name ?: ""
+                    Store.addLog(this@AlarmRingService, LogEntry(System.currentTimeMillis(), name, "", "开始响铃（最长 60 秒）", LogKind.RING_START))
                 } catch (e: Exception) {
                     Log.e(TAG, "log ring start failed", e)
                 }
@@ -110,6 +113,7 @@ class AlarmRingService : Service() {
     }
 
     override fun onTimeout(startId: Int) {
+        logStop("系统强制超时（shortService），响铃停止")
         stopNow()
     }
 
@@ -170,7 +174,10 @@ class AlarmRingService : Service() {
             logScope.launch {
                 Store.addLog(
                     this@AlarmRingService,
-                    LogEntry(System.currentTimeMillis(), "", "响铃", "响铃播放失败：${e.message ?: e.javaClass.simpleName}")
+                    LogEntry(
+                        System.currentTimeMillis(), "", "响铃",
+                        "响铃播放失败：${e.message ?: e.javaClass.simpleName}", LogKind.RING_FAILED
+                    )
                 )
             }
         }
@@ -189,6 +196,18 @@ class AlarmRingService : Service() {
 
     private fun defaultVibrator(): Vibrator? =
         getSystemService(VibratorManager::class.java)?.defaultVibrator
+
+    /** 记录停止类日志（异步写；onDestroy 后静默放弃） */
+    private fun logStop(text: String) {
+        if (!logScope.isActive) return
+        logScope.launch {
+            try {
+                Store.addLog(this@AlarmRingService, LogEntry(System.currentTimeMillis(), "", "", text, LogKind.STOP))
+            } catch (e: Exception) {
+                Log.e(TAG, "log stop failed", e)
+            }
+        }
+    }
 
     private fun stopNow() {
         handler.removeCallbacks(autoStop)

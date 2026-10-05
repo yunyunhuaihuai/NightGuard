@@ -10,6 +10,7 @@ import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.nightguard.app.data.LogEntry
+import com.nightguard.app.data.LogKind
 import com.nightguard.app.data.PendingTaskCore
 import com.nightguard.app.data.PendingTasks
 import com.nightguard.app.data.Store
@@ -151,8 +152,8 @@ object CallStateMonitor {
             androidx.core.app.NotificationManagerCompat.from(context).cancel(task.taskId.hashCode())
         } catch (e: SecurityException) {
         }
-        val ruleName = Store.ruleByIdSync(context, ruleId)?.name ?: ""
-        Store.addLog(context, LogEntry(System.currentTimeMillis(), ruleName, task.source, "来电已接听，闹钟自动取消"))
+        val ruleName = Store.ruleById(context, ruleId)?.name ?: ""
+        Store.addLog(context, LogEntry(System.currentTimeMillis(), ruleName, task.source, "来电已接听，闹钟自动取消", LogKind.CANCEL))
         Log.d(TAG, "CallStateMonitor: call answered, task cancelled ruleId=$ruleId")
     }
 }

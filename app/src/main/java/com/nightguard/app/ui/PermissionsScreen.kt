@@ -26,7 +26,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -45,8 +50,18 @@ private data class PermRow(
     val granted: Boolean,
     val optional: Boolean,
     val fixLabel: String,
+    /** 覆盖默认 ✓/✗ 的状态文案（如“已授权未连接/状态未知”） */
+    val statusLabel: String? = null,
     val fix: () -> Unit,
 )
+
+/** 通知使用权的四态：按当前进程的监听连接状态区分，历史连接时间仅用于诊断 */
+private enum class ListenerStatus(val label: String, val ok: Boolean) {
+    UNAUTHORIZED("✗ 未授权", false),
+    DISCONNECTED("✗ 已授权未连接", false),
+    CONNECTED("✓ 已连接", true),
+    UNKNOWN("？ 状态未知", false),
+}
 
 @Composable
 fun PermissionsScreen(tick: Int) {
@@ -58,7 +73,30 @@ fun PermissionsScreen(tick: Int) {
 
     val notifPerm = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
-    val nls = NotificationManagerCompat.getEnabledListenerPackages(ctx).contains(ctx.packageName)
+    val authorized = NotificationManagerCompat.getEnabledListenerPackages(ctx).contains(ctx.packageName)
+    val listenerStatus = when {
+        !authorized -> ListenerStatus.UNAUTHORIZED
+        com.nightguard.app.service.NightNotificationListener.boundInProcess -> ListenerStatus.CONNECTED
+        com.nightguard.app.service.NightNotificationListener.serviceCreatedInProcess -> ListenerStatus.DISCONNECTED
+        else -> ListenerStatus.UNKNOWN
+    }
+    // 历史连接时间：仅诊断用
+    var lastConn by remember { mutableStateOf(0L) }
+    var lastDisc by remember { mutableStateOf(0L) }
+    LaunchedEffect(tick) {
+        lastConn = Store.lastConnectedAt(ctx)
+        lastDisc = Store.lastDisconnectedAt(ctx)
+    }
+    val listenerDesc = buildString {
+        append("监听指定应用的消息与系统来电通知（核心，必开）")
+        if (lastConn > 0L) {
+            append("；上次连接 ").append(fmtStamp(lastConn))
+        }
+        if (lastDisc > 0L) {
+            append("，上次断开 ").append(fmtStamp(lastDisc))
+        }
+        if (lastConn > 0L || lastDisc > 0L) append("（历史时间仅用于诊断）")
+    }
     val exact = alm?.canScheduleExactAlarms() == true
     val batt = pm?.isIgnoringBatteryOptimizations(ctx.packageName) == true
     val fsi = nm?.canUseFullScreenIntent() == true
@@ -82,7 +120,7 @@ fun PermissionsScreen(tick: Int) {
         Intent(action, Uri.parse("package:" + ctx.packageName))
 
     val rows = listOf(
-        PermRow("通知使用权", "监听指定应用的消息与系统来电通知（核心，必开）", nls, false, "去开启") {
+        PermRow("通知使用权", listenerDesc, listenerStatus.ok, false, "去开启", listenerStatus.label) {
             go(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
         },
         PermRow("通知权限", "展示响铃通知与状态提醒", notifPerm, false, "授权") {
@@ -127,7 +165,8 @@ fun PermissionsScreen(tick: Int) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(row.title, fontSize = 16.sp, modifier = Modifier.weight(1f))
                         Text(
-                            if (row.granted) "✓ 已就绪" else if (row.optional) "○ 可选" else "✗ 未授权",
+                            row.statusLabel
+                                ?: if (row.granted) "✓ 已就绪" else if (row.optional) "○ 可选" else "✗ 未授权",
                             color = if (row.granted) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.error,
                             fontSize = 13.sp
@@ -213,10 +252,7 @@ fun PermissionsScreen(tick: Int) {
                             delayedAlarm = true, alarmDelayMinutes = 1,
                             cooldownSeconds = 0,
                         )
-                        Store.saveRules(
-                            ctx,
-                            Store.rulesSync(ctx).filter { it.id != "selftest" } + selftest
-                        )
+                        Store.upsertRule(ctx, selftest)
                         RuleEngine.onEventTriggered(ctx, selftest, "自检·模拟消息")
                     }
                 }) {
@@ -232,9 +268,9 @@ fun PermissionsScreen(tick: Int) {
                 Row {
                     OutlinedButton(onClick = {
                         scope.launch {
-                            Store.saveRules(ctx, Store.rulesSync(ctx).filter { it.id != "selftest" })
-                            // 统一清理：取消待响任务、抑制点、冷却记录与遗留提醒
+                            // 统一清理：取消待响任务、抑制点、冷却记录，再删除自检规则
                             com.nightguard.app.logic.ActionExecutor.cleanupRuleState(ctx, "selftest")
+                            Store.deleteRule(ctx, "selftest")
                         }
                     }) {
                         Text("④ 清除自检规则")
@@ -248,3 +284,6 @@ fun PermissionsScreen(tick: Int) {
 
 @Composable
 private fun LocalContextCurrent(): Context = androidx.compose.ui.platform.LocalContext.current
+
+private fun fmtStamp(at: Long): String =
+    java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(at))

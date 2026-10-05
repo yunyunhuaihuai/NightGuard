@@ -3,6 +3,7 @@ package com.nightguard.app.logic
 import android.content.Context
 import android.util.Log
 import com.nightguard.app.data.LogEntry
+import com.nightguard.app.data.LogKind
 import com.nightguard.app.data.PendingTask
 import com.nightguard.app.data.PendingTasks
 import com.nightguard.app.data.Rule
@@ -28,7 +29,7 @@ object TaskRecovery {
                 app,
                 LogEntry(
                     System.currentTimeMillis(), ruleName(rules, task.ruleId), task.source,
-                    "重启恢复：任务已过期（原定 ${fmt(task.fireAt)}），跳过响铃"
+                    "重启恢复：任务已过期（原定 ${fmt(task.fireAt)}），跳过响铃", LogKind.RECOVERY
                 )
             )
         }
@@ -37,7 +38,7 @@ object TaskRecovery {
                 app,
                 LogEntry(
                     System.currentTimeMillis(), ruleName(rules, task.ruleId), task.source,
-                    "重启恢复：$reason，丢弃待响任务"
+                    "重启恢复：$reason，丢弃待响任务", LogKind.RECOVERY
                 )
             )
         }
@@ -65,7 +66,7 @@ object TaskRecovery {
                 context,
                 LogEntry(
                     System.currentTimeMillis(), "", task.source,
-                    "恢复失败：闹钟重排异常（${e.message ?: e.javaClass.simpleName}）"
+                    "恢复失败：闹钟重排异常（${e.message ?: e.javaClass.simpleName}）", LogKind.RECOVERY
                 )
             )
             return
@@ -73,7 +74,7 @@ object TaskRecovery {
         if (!exact || note.isNotEmpty()) {
             val suffix = if (!exact) "（非精确模式，响铃时间不保证准点）" else ""
             val base = if (note.isNotEmpty()) note else "重启恢复：任务已重排"
-            Store.addLog(context, LogEntry(System.currentTimeMillis(), "", task.source, base + suffix))
+            Store.addLog(context, LogEntry(System.currentTimeMillis(), "", task.source, base + suffix, LogKind.RECOVERY))
         }
     }
 

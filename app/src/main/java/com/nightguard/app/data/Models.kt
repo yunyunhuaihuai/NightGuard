@@ -82,7 +82,38 @@ data class LogEntry(
     val rule: String,
     val source: String,
     val actions: String,
+    /** 事件类别（见 [LogKind]），旧记录为空串 */
+    val kind: String = "",
 )
+
+/**
+ * 日志事件类别：区分匹配后的装载、开始响铃、取消、停止与失败，
+ * 避免“触发成功”被误读为“实际响铃成功”。
+ */
+object LogKind {
+    const val ARM = "ARM"                 // 装载成功（含非精确降级标注）
+    const val ARM_SKIPPED = "ARM_SKIPPED" // 去重跳过（不是装载成功）
+    const val ARM_FAILED = "ARM_FAILED"   // 装载失败
+    const val RING_START = "RING_START"   // 实际开始响铃
+    const val RING_FAILED = "RING_FAILED" // 响铃启动/播放失败
+    const val CANCEL = "CANCEL"           // 取消（手动/接听/规则停用）
+    const val SUPPRESS = "SUPPRESS"       // 抑制命中或设置“今天不再响”
+    const val STOP = "STOP"               // 响铃停止（手动/超时）
+    const val RECOVERY = "RECOVERY"       // 重启恢复：重排/补响/过期/丢弃
+
+    fun label(kind: String): String = when (kind) {
+        ARM -> "装载"
+        ARM_SKIPPED -> "跳过"
+        ARM_FAILED -> "装载失败"
+        RING_START -> "开始响铃"
+        RING_FAILED -> "响铃失败"
+        CANCEL -> "取消"
+        SUPPRESS -> "抑制"
+        STOP -> "停止"
+        RECOVERY -> "恢复"
+        else -> ""
+    }
+}
 
 object RuleJson {
 
@@ -114,6 +145,13 @@ object RuleJson {
         put("cooldownSeconds", r.cooldownSeconds)
     }
 
+    /** 字符串便捷入口（编辑器草稿 Saver 用） */
+    fun ruleFromJsonString(s: String): Rule = try {
+        ruleFromJson(JSONObject(s))
+    } catch (e: Exception) {
+        Rule()
+    }
+
     fun ruleFromJson(o: JSONObject): Rule = Rule(
         id = o.optString("id", UUID.randomUUID().toString()),
         name = o.optString("name", "规则"),
@@ -141,6 +179,7 @@ object RuleJson {
         JSONArray().apply { list.forEach { e ->
             put(JSONObject().apply {
                 put("t", e.time); put("r", e.rule); put("s", e.source); put("a", e.actions)
+                if (e.kind.isNotEmpty()) put("k", e.kind)
             })
         } }.toString()
 
@@ -148,7 +187,7 @@ object RuleJson {
         val arr = JSONArray(s)
         (0 until arr.length()).map {
             val o = arr.getJSONObject(it)
-            LogEntry(o.optLong("t"), o.optString("r"), o.optString("s"), o.optString("a"))
+            LogEntry(o.optLong("t"), o.optString("r"), o.optString("s"), o.optString("a"), o.optString("k"))
         }
     } catch (e: Exception) {
         emptyList()

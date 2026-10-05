@@ -8,6 +8,7 @@ import android.service.notification.NotificationListenerService
 import android.util.Log
 import com.nightguard.app.R
 import com.nightguard.app.data.LogEntry
+import com.nightguard.app.data.LogKind
 import com.nightguard.app.data.PendingTasks
 import com.nightguard.app.data.Store
 import com.nightguard.app.logic.ActionExecutor
@@ -16,7 +17,11 @@ import com.nightguard.app.logic.CallStateMonitor
 import com.nightguard.app.logic.TaskRecovery
 import com.nightguard.app.service.AlarmRingService
 import com.nightguard.app.service.NightNotificationListener
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 /**
  * 统一广播入口：
@@ -25,29 +30,41 @@ import kotlinx.coroutines.runBlocking
  * - “今天不再响” → 抑制到统一窗口边界 + 规则级取消
  * - 每日心跳 → 监听连接自检（requestRebind 兜底 + 提醒）
  * - 开机/应用更新 → 心跳重排 + 待响任务幂等恢复
+ *
+ * 线程模型：goAsync + 独立协程，处理完在 finally 里 finish；
+ * 主线程不再 runBlocking。
  */
 class NightReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         val app = context.applicationContext
+        val result = goAsync()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        scope.launch {
+            try {
+                dispatch(app, intent)
+            } catch (t: Throwable) {
+                Log.e("NightGuard", "onReceive failed action=${intent.action}", t)
+            } finally {
+                result.finish()
+                scope.cancel()
+            }
+        }
+    }
+
+    private suspend fun dispatch(context: Context, intent: Intent) {
         val ruleId = intent.getStringExtra(AlarmScheduler.EXTRA_RULE_ID)
         val taskId = intent.getStringExtra(AlarmScheduler.EXTRA_TASK_ID)
         when (intent.action) {
-            AlarmScheduler.ACTION_DELAYED_ALARM ->
-                runBlocking { handleExpired(app, ruleId, taskId) }
-            AlarmScheduler.ACTION_HEARTBEAT ->
-                runBlocking { handleHeartbeat(app) }
+            AlarmScheduler.ACTION_DELAYED_ALARM -> handleExpired(context, ruleId, taskId)
+            AlarmScheduler.ACTION_HEARTBEAT -> handleHeartbeat(context)
             AlarmScheduler.ACTION_CANCEL_ALARM ->
-                runBlocking {
-                    ActionExecutor.cancelRuleAlarm(app, ruleId, taskId, "已手动取消本次闹钟（本次不响）")
-                }
-            AlarmScheduler.ACTION_SUPPRESS_RULE ->
-                runBlocking { handleSuppressRule(app, ruleId) }
-            Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED ->
-                runBlocking {
-                    AlarmScheduler.scheduleHeartbeat(app)
-                    TaskRecovery.recover(app)
-                }
+                ActionExecutor.cancelRuleAlarm(context, ruleId, taskId, "已手动取消本次闹钟（本次不响）", LogKind.CANCEL)
+            AlarmScheduler.ACTION_SUPPRESS_RULE -> handleSuppressRule(context, ruleId)
+            Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED -> {
+                AlarmScheduler.scheduleHeartbeat(context)
+                TaskRecovery.recover(context)
+            }
         }
     }
 
@@ -72,17 +89,17 @@ class NightReceiver : BroadcastReceiver() {
         if (task.fromCall && CallStateMonitor.anyCallOffhook(context)) {
             Store.addLog(
                 context,
-                LogEntry(System.currentTimeMillis(), Store.ruleByIdSync(context, ruleId)?.name ?: "", task.source, "来电已接听，闹钟自动取消")
+                LogEntry(System.currentTimeMillis(), Store.ruleById(context, ruleId)?.name ?: "", task.source, "来电已接听，闹钟自动取消", LogKind.CANCEL)
             )
             return
         }
-        val rule = Store.ruleByIdSync(context, ruleId)
+        val rule = Store.ruleById(context, ruleId)
         if (rule == null) {
-            Store.addLog(context, LogEntry(System.currentTimeMillis(), "", task.source, "任务对应的规则已删除，跳过响铃"))
+            Store.addLog(context, LogEntry(System.currentTimeMillis(), "", task.source, "任务对应的规则已删除，跳过响铃", LogKind.RECOVERY))
             return
         }
         if (!rule.enabled) {
-            Store.addLog(context, LogEntry(System.currentTimeMillis(), rule.name, task.source, "规则已禁用，跳过响铃"))
+            Store.addLog(context, LogEntry(System.currentTimeMillis(), rule.name, task.source, "规则已禁用，跳过响铃", LogKind.RECOVERY))
             return
         }
         AlarmScheduler.ensureChannels(context)
@@ -92,14 +109,14 @@ class NightReceiver : BroadcastReceiver() {
             Log.w("NightReceiver", "ring start failed", e)
             Store.addLog(
                 context,
-                LogEntry(System.currentTimeMillis(), rule.name, task.source, "响铃启动失败：${e.message ?: e.javaClass.simpleName}")
+                LogEntry(System.currentTimeMillis(), rule.name, task.source, "响铃启动失败：${e.message ?: e.javaClass.simpleName}", LogKind.RING_FAILED)
             )
         }
     }
 
     /** “今天不再响”：规则级抑制到统一窗口边界 + 取消当前任务 */
     private suspend fun handleSuppressRule(context: Context, ruleId: String?) {
-        val rule = ruleId?.let { Store.ruleByIdSync(context, it) } ?: return
+        val rule = ruleId?.let { Store.ruleById(context, it) } ?: return
         ActionExecutor.suppressRuleToday(context, rule)
     }
 

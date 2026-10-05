@@ -40,6 +40,7 @@ import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,39 +67,31 @@ private fun toggleIn(set: Set<String>, v: String): Set<String> =
     if (set.contains(v)) set - v else set + v
 
 @Composable
-fun RulesScreen() {
+fun RulesScreen(editing: Rule?, onEditChange: (Rule?) -> Unit) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    var rules by remember { mutableStateOf<List<Rule>>(emptyList()) }
-    var editing by remember { mutableStateOf<Rule?>(null) }
-
-    LaunchedEffect(Unit) {
-        rules = withContext(Dispatchers.IO) { Store.rulesSync(ctx) }
-    }
+    // 规则列表走 Flow：任何写入（事务内按 ID 更新/新增/删除）自动推送新列表
+    val rules by Store.rulesFlow(ctx).collectAsState(initial = emptyList())
 
     if (editing != null) {
-        val current = editing!!
+        val current = editing
         RuleEditor(
             initial = current,
             onClose = { saved ->
-                editing = null
+                onEditChange(null)
                 if (saved != null) {
-                    scope.launch(Dispatchers.IO) {
-                        val updated = Store.rulesSync(ctx).filter { it.id != saved.id } + saved
-                        Store.saveRules(ctx, updated)
-                        rules = Store.rulesSync(ctx)
+                    scope.launch {
+                        Store.upsertRule(ctx, saved)
                     }
                 }
             },
             onDelete = {
                 val id = current.id
-                editing = null
-                scope.launch(Dispatchers.IO) {
-                    // 统一清理：待响任务（闹钟/提醒/接听监听）、抑制点、冷却记录
+                onEditChange(null)
+                scope.launch {
+                    // 统一清理：待响任务（闹钟/提醒/接听监听）、抑制点、冷却记录，再删规则
                     com.nightguard.app.logic.ActionExecutor.cleanupRuleState(ctx, id)
-                    val updated = Store.rulesSync(ctx).filter { it.id != id }
-                    Store.saveRules(ctx, updated)
-                    rules = Store.rulesSync(ctx)
+                    Store.deleteRule(ctx, id)
                 }
             }
         )
@@ -120,25 +113,22 @@ fun RulesScreen() {
                     RuleCard(
                         rule = rule,
                         onToggle = { enabled ->
-                            scope.launch(Dispatchers.IO) {
-                                val updated = Store.rulesSync(ctx).map {
-                                    if (it.id == rule.id) it.copy(enabled = enabled) else it
-                                }
-                                Store.saveRules(ctx, updated)
+                            scope.launch {
+                                // 事务内按 ID 更新，不整表先读后写
+                                Store.updateRule(ctx, rule.id) { it.copy(enabled = enabled) }
                                 if (!enabled) {
                                     // 禁用即取消其待响任务，防止“禁用再启用后旧任务还会响”
                                     com.nightguard.app.logic.ActionExecutor.cleanupRuleState(ctx, rule.id)
                                 }
-                                rules = Store.rulesSync(ctx)
                             }
                         },
-                        onEdit = { editing = rule }
+                        onEdit = { onEditChange(rule) }
                     )
                 }
             }
         }
         FloatingActionButton(
-            onClick = { editing = Rule() },
+            onClick = { onEditChange(Rule()) },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(20.dp)

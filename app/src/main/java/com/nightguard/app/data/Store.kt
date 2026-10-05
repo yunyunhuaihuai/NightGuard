@@ -6,10 +6,12 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.map
 
-private val Context.dataStore by preferencesDataStore(name = "nightguard")
+// internal：同模块的单元测试需要直接写入旧键验证迁移逻辑
+internal val Context.dataStore by preferencesDataStore(name = "nightguard")
 
 /**
  * 所有本地状态：规则、日志、动作一的“现场”、去重表、监听器连接状态。
@@ -77,18 +79,71 @@ object Store {
     suspend fun rules(ctx: Context): List<Rule> =
         RuleJson.rulesFromJson(ctx.dataStore.data.first()[KEY_RULES] ?: "[]")
 
+    /** 规则 Flow：任何写操作（含事务内按 ID 更新）都会推送新列表 */
+    fun rulesFlow(ctx: Context): Flow<List<Rule>> =
+        ctx.dataStore.data.map { RuleJson.rulesFromJson(it[KEY_RULES] ?: "[]") }
+
     suspend fun saveRules(ctx: Context, rules: List<Rule>) {
         ctx.dataStore.edit { it[KEY_RULES] = RuleJson.rulesToJson(rules) }
     }
 
-    fun rulesSync(ctx: Context): List<Rule> = runBlocking { rules(ctx) }
+    /** 新增或按 ID 覆盖保存单条规则（单事务，不再整表先读后写） */
+    suspend fun upsertRule(ctx: Context, rule: Rule) {
+        ctx.dataStore.edit { p ->
+            val list = RuleJson.rulesFromJson(p[KEY_RULES] ?: "[]").filterNot { it.id == rule.id } + rule
+            p[KEY_RULES] = RuleJson.rulesToJson(list)
+        }
+    }
 
-    fun ruleByIdSync(ctx: Context, id: String): Rule? =
-        rulesSync(ctx).firstOrNull { it.id == id }
+    /**
+     * 事务内按 ID 更新单条规则：读-改-写在一个 dataStore.edit 中完成，
+     * 并发修改不同规则不会互相覆盖（每个事务都基于最新数据）。
+     */
+    suspend fun updateRule(ctx: Context, ruleId: String, transform: (Rule) -> Rule): Boolean {
+        var changed = false
+        ctx.dataStore.edit { p ->
+            val list = RuleJson.rulesFromJson(p[KEY_RULES] ?: "[]")
+            val idx = list.indexOfFirst { it.id == ruleId }
+            if (idx >= 0) {
+                val updated = list.toMutableList()
+                updated[idx] = transform(list[idx])
+                p[KEY_RULES] = RuleJson.rulesToJson(updated)
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    /** 事务内删除规则并同事务清理其抑制点与冷却记录（待响任务由状态机先行取消） */
+    suspend fun deleteRule(ctx: Context, ruleId: String) {
+        ctx.dataStore.edit { p ->
+            val list = RuleJson.rulesFromJson(p[KEY_RULES] ?: "[]")
+            if (list.any { it.id == ruleId }) {
+                p[KEY_RULES] = RuleJson.rulesToJson(list.filterNot { it.id == ruleId })
+            }
+            val sup = RuleJson.mapFromJson(p[KEY_SUPPRESS] ?: "{}")
+            if (sup.containsKey(ruleId)) {
+                val m = sup.toMutableMap(); m.remove(ruleId)
+                p[KEY_SUPPRESS] = RuleJson.mapToJson(m)
+            }
+            val lt = RuleJson.mapFromJson(p[KEY_LAST_TRIGGER] ?: "{}")
+            if (lt.containsKey(ruleId)) {
+                val m = lt.toMutableMap(); m.remove(ruleId)
+                p[KEY_LAST_TRIGGER] = RuleJson.mapToJson(m)
+            }
+        }
+    }
+
+    suspend fun ruleById(ctx: Context, id: String): Rule? =
+        rules(ctx).firstOrNull { it.id == id }
 
     // ---------- 日志（仅记录触发元数据，不存消息内容） ----------
     suspend fun log(ctx: Context): List<LogEntry> =
         RuleJson.logFromJson(ctx.dataStore.data.first()[KEY_LOG] ?: "[]")
+
+    /** 日志 Flow：新增条目即推送（最新在前） */
+    fun logFlow(ctx: Context): Flow<List<LogEntry>> =
+        ctx.dataStore.data.map { RuleJson.logFromJson(it[KEY_LOG] ?: "[]") }
 
     suspend fun addLog(ctx: Context, e: LogEntry) {
         ctx.dataStore.edit { p ->
@@ -98,8 +153,6 @@ object Store {
             p[KEY_LOG] = RuleJson.logToJson(list)
         }
     }
-
-    fun logSync(ctx: Context): List<LogEntry> = runBlocking { log(ctx) }
 
     /**
      * 一次性脱敏历史“来电候选”日志：旧版本会把来电通知原文（可含完整号码/联系人姓名）
@@ -135,10 +188,10 @@ object Store {
         }
     }
 
-    // ---------- 待响闹钟（防重复定时） ----------
+    // ---------- 待响任务（第二阶段统一生命周期，替代 pendingAlarm；旧键仅迁移用） ----------
     suspend fun pendingTasks(ctx: Context): List<PendingTask> = pendingTaskBacking.read(ctx)
 
-    /** 删除规则时统一清理其运行状态（抑制点、冷却记录） */
+    /** 禁用规则等场景：不删规则，只清其运行状态（抑制点、冷却记录） */
     suspend fun removeRuleStateKeys(ctx: Context, ruleId: String) {
         ctx.dataStore.edit { p ->
             val sup = RuleJson.mapFromJson(p[KEY_SUPPRESS] ?: "{}")
@@ -151,17 +204,6 @@ object Store {
                 val m = lt.toMutableMap(); m.remove(ruleId)
                 p[KEY_LAST_TRIGGER] = RuleJson.mapToJson(m)
             }
-        }
-    }
-
-    suspend fun pendingAlarms(ctx: Context): Map<String, Long> =
-        RuleJson.mapFromJson(ctx.dataStore.data.first()[KEY_PENDING] ?: "{}")
-
-    suspend fun setPendingAlarm(ctx: Context, ruleId: String, at: Long) {
-        ctx.dataStore.edit { p ->
-            val m = RuleJson.mapFromJson(p[KEY_PENDING] ?: "{}").toMutableMap()
-            if (at <= 0L) m.remove(ruleId) else m[ruleId] = at
-            p[KEY_PENDING] = RuleJson.mapToJson(m)
         }
     }
 
@@ -187,6 +229,13 @@ object Store {
 
     suspend fun isConnected(ctx: Context): Boolean =
         ctx.dataStore.data.first()[KEY_CONNECTED] ?: false
+
+    /** 历史连接时间戳，仅用于诊断展示 */
+    suspend fun lastConnectedAt(ctx: Context): Long =
+        ctx.dataStore.data.first()[KEY_LAST_CONNECTED] ?: 0L
+
+    suspend fun lastDisconnectedAt(ctx: Context): Long =
+        ctx.dataStore.data.first()[KEY_LAST_DISCONNECTED] ?: 0L
 
     suspend fun lastRebindAt(ctx: Context): Long =
         ctx.dataStore.data.first()[KEY_LAST_REBIND] ?: 0L

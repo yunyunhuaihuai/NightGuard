@@ -17,12 +17,17 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.lifecycleScope
+import com.nightguard.app.data.Rule
+import com.nightguard.app.data.RuleJson
 import com.nightguard.app.data.Store
 import com.nightguard.app.logic.AlarmScheduler
-import androidx.lifecycle.lifecycleScope
+import com.nightguard.app.logic.TaskRecovery
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -52,7 +57,7 @@ class MainActivity : ComponentActivity() {
             // 旧版本把“来电候选”通知原文（可含完整号码）写进了持久化日志：升级后一次性脱敏
             Store.redactLegacyCallCandidateLogs(this@MainActivity)
             // 应用启动后的幂等恢复：重排丢失的精确闹钟、跳过过期任务、重挂接听监听
-            com.nightguard.app.logic.TaskRecovery.recover(this@MainActivity)
+            TaskRecovery.recover(this@MainActivity)
         }
         // 状态栏/导航栏透明，浅色图标，与应用深色主题无缝衔接（消除黑色割裂条）
         enableEdgeToEdge(
@@ -67,9 +72,17 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** 规则编辑草稿的 Saveable 编解码：JSON 字符串落盘到实例状态，进程重建可恢复 */
+private val RuleDraftSaver = Saver<Rule?, String>(
+    save = { it?.let { r -> RuleJson.ruleToJson(r).toString() } ?: "" },
+    restore = { if (it.isEmpty()) null else RuleJson.ruleFromJsonString(it) },
+)
+
 @Composable
 fun NightGuardApp(tick: Int) {
-    var tab by remember { mutableIntStateOf(1) } // 启动页：规则
+    var tab by rememberSaveable { mutableIntStateOf(1) } // 启动页：规则
+    // 编辑草稿挂在本层并 rememberSaveable：切页、旋转、进程重建都能恢复正在编辑的内容
+    var editing by rememberSaveable(stateSaver = RuleDraftSaver) { mutableStateOf<Rule?>(null) }
     val tabs = listOf("权限", "规则", "日志")
     Scaffold { padding ->
         Column(
@@ -84,8 +97,8 @@ fun NightGuardApp(tick: Int) {
             }
             when (tab) {
                 0 -> PermissionsScreen(tick)
-                1 -> RulesScreen()
-                2 -> LogScreen(tick)
+                1 -> RulesScreen(editing = editing, onEditChange = { editing = it })
+                2 -> LogScreen()
             }
         }
     }
